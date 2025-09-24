@@ -44,6 +44,10 @@ Product success metrics (pilot)
 
 Routes
 - / (Landing: login/signup)
+- /verify (Email verification landing; consumes token from URL)
+- Navigation rules
+  - Unverified users can log in but are gated to a “Verify your email” screen for /home, /drill, /account until verified. Resend Verification button available (rate-limited).
+
 - /home (Home: start)
 - /drill (Drill: live tracking UI)
 - /account (Account: Summary, Session History with inline reports, Edit)
@@ -53,6 +57,10 @@ Navigation rules
 - After login/signup → /home.
 - Top nav: Home, Drill, Account (only when authenticated).
 - Direct links to /drill and /account redirect to / if unauthenticated.
+
+Routes
+
+
 
 # 4. Page Specifications and UX Flows
 
@@ -64,6 +72,17 @@ Content
 - Signup: name, email, password; checkbox to accept ToS/Privacy
 - “Beta full” state when user cap reached; show waitlist form (email only)
 - Privacy note: “All analysis stays on your device. We never upload video.”
+- After signup: show “Check your email to verify your account.” with Resend link (rate-limited).
+- After login (if unverified): redirect to Verify screen.
+
+Verify (/verify)
+- Behavior:
+  - Reads token from URL (verify?token=...); calls POST /api/auth/verify {token}.
+  - Success: “Email verified!” → Continue to /home.
+  - Invalid/expired: show error with “Resend verification email” button.
+  - If cap reached after signup: show “Beta is full” and a Waitlist button.
+- Accessibility: focus management, clear status messages (success/error).
+
 
 Validation and UX
 - Email format; password min 8 (recommend 12+), strength hint
@@ -280,6 +299,21 @@ Storage and Persistence
   - aggregates: per-session KPIs and charts
 - Privacy: No video/audio frames stored or transmitted
 
+Auth + Email Verification
+- Verification policy:
+  - EMAIL_VERIFICATION_REQUIRED=true in production.
+  - Only verified users count toward SIGNUP_CAP.
+- Flow:
+  - Signup creates user with isVerified=false; generates a one-time token (32–40 bytes), stores hash + expiry (24h) in verification_tokens; sends magic link via Resend.
+  - Login for unverified users returns 403 with code: "email_unverified".
+  - Resend verification allowed, rate-limited (e.g., 3/day/user).
+- Endpoints:
+  - POST /api/auth/verify {token} → 204 on success; 400 invalid/expired; 403 beta_full_after_signup if cap filled after signup.
+  - POST /api/auth/resend-verify → 204; auth required (or accept email+password if you don’t issue tokens to unverified users); replaces any previous token.
+- Security:
+  - Store only token hash (sha256) + expiry; single use (burn on success).
+  - TTL index on verification_tokens.expiresAt to auto-expire.
+
 # 6. Non-Functional Requirements
 
 Performance
@@ -310,6 +344,16 @@ Compatibility
 - WebGL2 required; WebGPU optional
 - Camera: 720p recommended; 1080p supported if FPS holds
 
+Security & Privacy (add)
+- Email verification required (prod). Unverified users cannot access protected routes.
+- Do not log tokens or PII. Generic errors for invalid/expired tokens.
+
+Email Service (new subsection)
+- Provider: Resend (Node SDK).
+- DNS: configure SPF/DKIM (and DMARC p=none to start) for sending domain.
+- Env vars: RESEND_API_KEY, EMAIL_FROM (e.g., verify@yourdomain), APP_BASE_URL (e.g., https://app.yourdomain), EMAIL_VERIFICATION_TTL_HOURS=24, EMAIL_VERIFICATION_REQUIRED=true.
+
+
 # 7. System Architecture
 
 Frontend
@@ -328,10 +372,15 @@ Backend (MERN)
   - Sessions (meta+config) CRUD
   - Aggregates (per-session KPIs) CRUD
   - Signup cap enforcement and waitlist
+- Email Service: wrap Resend behind EmailService interface:
+  - sendVerificationEmail({ to:string, link:string }): Promise<void>
+- Rate limiting: /auth/signup, /auth/login strict; /auth/resend-verify limited to 3/day/user.
 
 Deployment
 - Client: Netlify/Vercel (SPA build), cache-busting; optional PWA manifest
-- Server: Render/Fly/Heroku tiny dyno; env vars: MONGO_URI, JWT_SECRET, RATE_LIMIT, SIGNUP_CAP=50, SMTP_… (optional)
+- Server: Render/netlify/Fly/Heroku tiny dyno; env vars: MONGO_URI, JWT_SECRET, RATE_LIMIT, SIGNUP_CAP=50, SMTP_… (optional)
+- Netlify Functions: set RESEND_API_KEY, EMAIL_FROM, APP_BASE_URL, EMAIL_VERIFICATION_TTL_HOURS, EMAIL_VERIFICATION_REQUIRED in environment settings.
+
 
 # 8. Data Model
 
@@ -348,6 +397,18 @@ users
   - uiScale: 'large'|'normal'
   - units: 'metric'|'imperial'
 - statsCache (optional): { totalSessions:number, totalMatTimeMs:number, lastSyncAt?:Date }
+- isVerified: boolean (default false)
+- verifiedAt?: Date
+
+verification_tokens (new collection)
+- id: ObjectId
+- userId: ObjectId
+- tokenHash: string (sha256)
+- expiresAt: Date (TTL index)
+- usedAt?: Date
+- type: 'email_verify'
+- createdAt: Date
+
 
 sessions
 - id: ObjectId
@@ -401,6 +462,8 @@ Indexes
 - users.email unique
 - sessions.userId + start desc
 - aggregates.sessionId unique
+- verification_tokens.expiresAt TTL index (expireAfterSeconds: 0)
+
 
 # 9. API Contracts (high level)
 
@@ -412,6 +475,11 @@ Auth
 - POST /auth/change-password: {currentPassword,newPassword} → 204
 - POST /auth/forgot (optional): {email} → 204
 - POST /auth/reset (optional): {token,newPassword} → 204
+- POST /auth/signup: creates user isVerified=false, sends verification email via Resend.
+- POST /auth/login: 200 {user, token} if verified; 403 {code:'email_unverified'} if not.
+- POST /auth/verify: {token} → 204; 400 invalid/expired; 403 {code:'beta_full_after_signup'} if cap filled post‑signup.
+- POST /auth/resend-verify: → 204; rate-limited (3/day/user).
+
 
 User
 - GET /me → {user:{id,name,email,settings}}
@@ -435,6 +503,8 @@ Security and Limits
 - JWT required (Bearer) for all non-auth endpoints
 - Rate limit: 10 req/min/auth endpoints; 60 req/min general
 - CORS allowlist to client origin
+- Rate limit /auth/resend-verify: 3/day/user. Tokens single-use; previous tokens invalidated on resend.
+
 
 Note: No remote /events endpoint in MVP; raw events remain local-only.
 
@@ -479,7 +549,25 @@ Voice Phrases
 Onboarding/Help Copy
 - Camera distance (1.5–3.5 m), angle (side or 45°), lighting tips, privacy statement, safety disclaimer
 
+Email Templates (Resend)
+- Subject: Verify your BJJ Tracker account
+- From: EMAIL_FROM (e.g., verify@yourdomain)
+- Body (HTML + text):
+  - “Hi {name}, confirm your email to activate your account.”
+  - Button/link to: ${APP_BASE_URL}/verify?token=${token}
+  - “This link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. If you didn’t sign up, ignore this email.”
+- Resend configuration: use Resend Node SDK; no images/attachments.
+
+
 # 12. UI Specifications (key components)
+
+Verify page
+- States: verifying…, success, invalid/expired (with Resend button), cap-full-after-signup.
+- Resend button disabled with visible cooldown when rate limited.
+
+Landing/Login (augment)
+- After signup: show “Check your email” panel with Resend.
+- After login (unverified): redirect to Verify page.
 
 Camera tile (Drill)
 - States: idle (click to enable), requesting, live, error
@@ -503,6 +591,8 @@ Edit forms
 - Inline validation; Save disabled until changes; toasts on save
 - Email change prompts for password
 
+
+
 # 13. Accessibility and Localization
 
 - WCAG AA contrast; button sizes ≥44px
@@ -516,13 +606,29 @@ Unit tests (Jest/Vitest)
 - Feature math (angles, normalization, EMA velocity)
 - Classifier scoring for synthetic poses
 - KPI calculators (control time %, intensity, reaction speed, guard retention, error counts)
+- Token generation: hash stored, correct TTL.
+- Verification: valid token → sets isVerified=true; burns token. Expired/used → 400.
+- Resend limits: denies after 3/day/user.
+
 
 Integration tests
 - Pose engine init/dispose; FPS meter; engine switch
 - Voice engine queue/throttle behavior
 - Camera switching (facingMode/deviceId); overlay toggle behavior
+- Signup → token created; Resend called (mocked).
+- Login unverified → 403 email_unverified.
+- POST /auth/verify with valid token → 204; login now 200.
+- Resend works and invalidates prior token.
+- Cap behavior:
+  - Count only verified users toward SIGNUP_CAP.
+  - When verifiedCount >= cap: new signup → 403 cap reached.
+  - An existing unverified user trying to verify after cap → 403 beta_full_after_signup.
+
 
 E2E tests (Playwright/Cypress)
+- Signup → “Check your email” screen → click mocked verify link → success → /home loads.
+- Login while unverified → Verify page with working Resend.
+- Invalid/expired token → error → Resend succeeds.
 - Auth: signup/login/logout; cap enforcement; waitlist
 - Flow: Landing → Home → Drill → Enable camera → Start/Pause/Stop → Recap → Save → Account Summary update → Session History inline View
 - Drill options: Training Goals/Focus Areas Select All toggles; affect suggestions/voice only for that session; saved in session.config
@@ -539,6 +645,11 @@ Performance validation
 # 15. Acceptance Criteria (Definition of Done)
 
 - Landing: login/signup works; 50-user cap enforced; waitlist works when full
+- Email verification is required (prod). Unverified users are blocked from /home, /drill, /account and see a Verify page with Resend.
+- Verification email sent via Resend on signup and on Resend action (rate-limited).
+- Only verified users count toward the 50-user cap.
+- Verification token is single-use, expires per TTL, and never logged.
+- If cap fills post-signup, verify returns 403 beta_full_after_signup with a friendly message and waitlist option.
 - Home: Start Drill → modal (Partner/Solo) → correct routing
 - Drill:
   - Click-to-enable camera; camera selector works (desktop dropdown; mobile Front default with toggle to Rear)
@@ -572,6 +683,11 @@ Monitoring
 - Server logs: auth attempts, API latencies, rate-limit triggers
 - Error reporting: client (Sentry optional; no PII or frames), server (structured logs)
 
+- Configure Resend: verify domain (SPF/DKIM), set EMAIL_FROM.
+- Monitor verification success rate and bounce events (via Resend dashboard).
+- Toggle EMAIL_VERIFICATION_REQUIRED=false for local/dev and true for staging/prod.
+
+
 # 17. Risks and Mitigations
 
 - Occlusions → mislabels: show confidence; camera setup tips; hysteresis smoothing; Unknown fallback
@@ -579,10 +695,13 @@ Monitoring
 - Browser permissions: explicit click-to-enable; clear recovery steps
 - Performance variance: resolution auto-tune; engine switch; lower detection cadence
 - Data trust: transparent privacy messaging; store only aggregates/meta remotely
+- Email deliverability issues → Use verified domain with SPF/DKIM; keep templates simple; default to Postmark if deliverability drops.
+- Token abuse/spam → rate limit resend (3/day), short TTL (24h), single-use tokens, generic error responses.
 
-# 18. Implementation Plan (6 weeks)
+# 18. Implementation Plan 
 
-- W1: MERN scaffold; Auth (Landing), Home; 50-user cap + waitlist; client state, routing
+- W1: MERN scaffold; Auth (Landing), Home; 50-user cap + waitlist; client state, routing; Add users.isVerified, verification_tokens model + TTL, Resend EmailService, /auth/verify and /auth/resend-verify; integrate into signup; tests.
+- W1 (client): Add /verify route and unverified gating; Resend UI; tests.
 - W2: MediaPipe engine (2 persons), MoveNet fallback; FPS meter; Camera tile UX; camera selector; overlay toggle
 - W3: Feature extraction + partner classifier; Identity tracker; Suggestion engine (Goals/Focus aware); Voice engine
 - W4: Session engine; live KPIs; Recap modal; Solo drill detection + KPIs
@@ -591,11 +710,11 @@ Monitoring
 
 # 19. Open Questions
 
-- Allow “Guest session” (no login) for quick demo? Default off to enforce cap.
+- Allow “Guest session” (no login) for quick demo? Default off to enforce cap. - yes i need guest sesssion which required no login 
 - Scramble Win % perspective default: top-dominance vs escape success?
-- Email verification required for signup or optional (lower friction)?
-- Store TTS voice selection per device or account? (account-level preferred)
-- Data retention beyond 12 months configurable per user?
+- Email verification required for signup or optional (lower friction)? its added , we are using Resend email service
+- Store TTS voice selection per device or account? (account-level preferred) - dont need to store this ssettings in db , keep it device
+- Data retention beyond 12 months configurable per user? - only 3 months 
 
 # 20. Appendix: Copy and Error States
 
@@ -603,6 +722,11 @@ Key messages
 - Privacy: “All analysis happens in your browser. We never upload video.”
 - Camera denied: “Camera access is blocked. Allow camera for this site in your browser settings and click Retry.”
 - Cap reached: “Beta is currently full. Join the waitlist and we’ll email you when a spot opens.”
+
+- Unverified login: “Please verify your email to continue. We’ve sent a link to {email}. Didn’t get it? Resend.”
+- Verify success: “Email verified! You’re all set.”
+- Verify invalid/expired: “This link is invalid or has expired. Resend a new link.”
+- Beta full after signup: “Beta is full now. Your verification can’t complete. Join the waitlist and we’ll notify you when a spot opens.”
 
 Validation rules
 - Name: 1–60 chars; no control chars
