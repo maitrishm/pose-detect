@@ -5,7 +5,9 @@ import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import createError from 'http-errors';
 
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN;
+// Load config early (will exit if invalid)
+import { getConfig } from './config/config';
+const { CLIENT_ORIGIN } = getConfig();
 
 const app = express();
 
