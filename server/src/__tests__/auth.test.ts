@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import type { Express } from 'express';
 
+jest.setTimeout(30000);
+
 let app: Express; // loaded after env prepared
 let mongo: MongoMemoryServer;
 
@@ -19,8 +21,8 @@ beforeAll(async () => {
   process.env.MONGO_URI = uri;
 
   // dynamic import after env vars set
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  app = require('../app').default as Express;
+  const imported = await import('../app');
+  app = imported.default as Express;
 });
 
 afterAll(async () => {

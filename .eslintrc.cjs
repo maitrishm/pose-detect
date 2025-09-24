@@ -26,6 +26,12 @@ module.exports = {
       }
     },
     {
+      files: ['**/__tests__/**/*.{ts,tsx,js,jsx}'],
+      rules: {
+        '@typescript-eslint/no-var-requires': 'off'
+      }
+    },
+    {
       files: ['*.ts','*.tsx'],
       rules: {
         'next/no-html-link-for-pages': 'off'

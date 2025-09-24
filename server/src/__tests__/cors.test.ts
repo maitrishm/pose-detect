@@ -3,14 +3,14 @@ import type { Express } from 'express';
 
 const ORIGINAL = process.env.CLIENT_ORIGIN;
 let app: Express;
-beforeAll(() => {
+beforeAll(async () => {
   process.env.MONGO_URI = 'mongodb://localhost:27017/test';
   process.env.JWT_SECRET = 'test_jwt_secret_value_123456';
   process.env.SIGNUP_CAP = '50';
   process.env.RATE_LIMIT = '300';
   process.env.CLIENT_ORIGIN = 'https://allowed.example';
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  app = require('../app').default;
+  const imported = await import('../app');
+  app = imported.default as Express;
 });
 
 afterAll(() => {

@@ -2,11 +2,12 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-import { User } from '../models/User';
-import { Waitlist } from '../models/Waitlist';
 import { getConfig } from '../config/config';
 import { connectDB } from '../db/connection';
+import { User } from '../models/User';
+import { Waitlist } from '../models/Waitlist';
 import { authRequired, AuthRequest } from '../middleware/auth';
+import { settingsSchema } from '../schemas/settings';
 
 const router = Router();
 
@@ -26,16 +27,14 @@ router.post('/auth/signup', async (req, res) => {
   if (count >= SIGNUP_CAP) return res.status(403).json({ error: 'Signup cap reached' });
   const passwordHash = await bcrypt.hash(password, 12);
   const user = await User.create({ name, email: email.toLowerCase(), passwordHash });
-  return res
-    .status(201)
-    .json({
-      user: {
-        id: user._id.toString(),
-        name: user.name,
-        email: user.email,
-        settings: user.settings,
-      },
-    });
+  return res.status(201).json({
+    user: {
+      id: user._id.toString(),
+      name: user.name,
+      email: user.email,
+      settings: user.settings,
+    },
+  });
 });
 
 router.post('/auth/login', async (req, res) => {
@@ -107,5 +106,47 @@ router.get('/me', authRequired(), async (req: AuthRequest, res) => {
     },
   });
 });
+
+router.get(
+  '/settings',
+  authRequired({ envelope: true }),
+  async (req: AuthRequest, res) => {
+    await connectDB();
+    const user = await User.findById(req.user!.id).lean();
+    if (!user)
+      return res
+        .status(401)
+        .json({ error: { code: 'UNAUTHORIZED', message: 'Unauthorized' } });
+    return res.json({ settings: user.settings || {} });
+  }
+);
+
+router.put(
+  '/settings',
+  authRequired({ envelope: true }),
+  async (req: AuthRequest, res) => {
+    await connectDB();
+    const parse = settingsSchema.safeParse(req.body);
+    if (!parse.success) {
+      return res
+        .status(400)
+        .json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Invalid settings',
+            details: parse.error.flatten(),
+          },
+        });
+    }
+    const user = await User.findById(req.user!.id);
+    if (!user)
+      return res
+        .status(401)
+        .json({ error: { code: 'UNAUTHORIZED', message: 'Unauthorized' } });
+    user.settings = { ...(user.settings || {}), ...parse.data };
+    await user.save();
+    return res.json({ settings: user.settings });
+  }
+);
 
 export default router;
