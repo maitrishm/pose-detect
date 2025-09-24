@@ -4,6 +4,7 @@ export interface IUser extends Document {
   name: string;
   email: string;
   passwordHash: string;
+  settings?: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -20,6 +21,7 @@ const UserSchema = new Schema<IUser>(
       trim: true,
     },
     passwordHash: { type: String, required: true },
+    settings: { type: Schema.Types.Mixed, default: {} },
   },
   { timestamps: true }
 );

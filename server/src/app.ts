@@ -5,8 +5,10 @@ import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import createError from 'http-errors';
 
-// Load config early (will exit if invalid)
 import { getConfig } from './config/config';
+import authRouter from './routes/auth';
+
+// Load config early (will exit if invalid)
 const { CLIENT_ORIGIN } = getConfig();
 
 const app = express();
@@ -42,6 +44,18 @@ app.use(
 );
 
 app.use(express.json({ limit: '1mb' }));
+
+// Login specific small limiter (bursty attempts)
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/auth/login', loginLimiter);
+
+// Auth + user routes
+app.use('/api', authRouter);
 
 // Health route
 app.get('/api/health', (_req, res) => {
