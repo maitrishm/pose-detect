@@ -1,49 +1,76 @@
-# Copilot project instructions — pose-detect (BJJ Tracker MVP)
+## Copilot Project Instructions — pose-detect (BJJ Tracker MVP)
 
-Purpose
-- Build a MERN web app that runs BJJ pose detection/classification entirely in-browser; only session metadata and aggregate KPIs are stored remotely. PRD is authoritative: see `PRD.md`.
+Source of truth: `PRD.md` (reflects updated Next.js + serverless deployment). Keep these instructions concise and current; update when architecture shifts.
 
-Architecture (big picture)
-- Frontend: React + TypeScript SPA (CRA/Webpack; no Vite). State: Zustand. Validation: Zod. Styling: Tailwind or CSS Modules. Inference on-device: MediaPipe Pose Landmarker (primary), TF.js MoveNet (fallback).
-- Backend: Node + Express + MongoDB (Atlas). JWT auth. Email via Resend. Stores users, sessions (meta+config), aggregates only. No video/audio or per-frame data to server.
-- Storage split: IndexedDB for raw events/timelines; MongoDB for aggregates/auth. Privacy-first.
+1. Purpose & Privacy
 
-Core modules and contracts (client)
-- PoseEngine interface (keep stable): `init(videoEl)`, `start()`, `stop()`, `onResults(cb)`, `setRunningMode('video'|'image')`, `dispose()`; VIDEO mode, `numPoses=2`, degrade to 1 if slow.
-- IdentityTracking (2 people): Hungarian matching; short dropout tolerance; optional user calibration (“raise right hand”).
-- PositionClassification (Partner): labels Mount/Side/Back/KOB/NS/Guard/Turtle/Scramble; hysteresis 2–3 frames; min dwell 200–400 ms.
-- SoloDrillDetection: per-drill `detectPhase` + `repCompleted`; thresholds in JSON; track left/right.
-- SessionEngine: Start/Pause/Stop; round/rest; emits `position_change`, manual attempt tags, `solo_rep`, `note`. Live KPIs every 1s with smoothing.
-- VoiceCueEngine: Web Speech API TTS; modes Basic/Technical/Motivational/Silent; throttled queue; obey per-session Goals/Focus.
+   - On-device pose detection/classification (MediaPipe Pose Landmarker primary; TF.js MoveNet fallback). Never upload video/audio or per-frame landmarks. Only session meta + derived aggregates go to backend.
 
-Backend surface (highlights)
-- Auth: `POST /auth/signup`, `/auth/login`, `/auth/verify {token}`, `/auth/resend-verify` (rate limit 3/day). Verification required in prod; only verified users count toward `SIGNUP_CAP`.
-- Data: Sessions CRUD (meta+config) and Aggregates CRUD (per-session KPIs/charts). No raw per-frame endpoint in MVP.
-- Security: store only verification token hashes (sha256) with TTL; JWT required for non-auth endpoints.
+2. Stack Overview
 
-Non‑negotiables
-- Privacy: never upload video/audio or per-frame landmarks; only aggregates remotely.
-- Performance: target ≥20 FPS at 720p; degrade to keep ≥16 FPS; latency <150 ms median. Provide FPS meter (can be hidden) and auto-resolution tuning.
-- Gating: unauthenticated → `/`; unverified users gated to `/verify` for protected routes; Resend flow supported.
-- Session Focus: Goals/Focus affect suggestions/voice in-session only; persisted under `session.config` (not account defaults).
-- Device vs account: TTS voice selection is device-local; do not store in DB.
-- Data retention: remote aggregates retained 3 months (per PRD decisions).
+   - Frontend (current PRD): Next.js 14 (App Router) + React 18 + TypeScript; Zustand state; Zod validation; Tailwind or CSS Modules; dynamic imports (`ssr:false`) for any camera/pose logic.
+   - Backend: Node + Express (serverless function on Netlify) + MongoDB Atlas; JWT auth; Resend for email (verification/rate limit). Earlier CRA notes are legacy—prefer Next.js setup now.
+   - Storage split: IndexedDB (raw local events & timelines); MongoDB (auth, session meta, aggregates). LocalStorage only for lightweight UI prefs (overlay toggle, last camera, etc.).
 
-Conventions and routing
-- SPA routes: `/` (Landing), `/verify`, `/home`, `/drill?mode=partner|solo`, `/account`. Redirect unauthenticated to `/`; redirect unverified to `/verify`.
-- Libraries: Zustand for state, Zod for schemas, Day.js for dates. CRA/Webpack expected (avoid Vite).
-- Config data: Tips/Drills as JSON keyed by `(label+role)` with tags `focusAreas[]` and `trainingGoals[]`; thresholds and phrases are data-driven.
+3. Core Client Contracts (DO NOT BREAK)
 
-Developer workflows (once scaffolding exists)
-- Client/server scripts: use CRA/Webpack and ts-node/nodemon; confirm exact commands from `package.json`.
-- Required env vars: `MONGO_URI`, `JWT_SECRET`, `SIGNUP_CAP`, `RESEND_API_KEY`, `EMAIL_FROM`, `APP_BASE_URL`, `EMAIL_VERIFICATION_TTL_HOURS`, `EMAIL_VERIFICATION_REQUIRED`.
-- Tests focus: feature math (angles/EMA), classifiers, KPI calculators; E2E for auth → verify → drill → recap → account flows.
+   - PoseEngine: `init(videoEl)`, `start()`, `stop()`, `onResults(cb)`, `setRunningMode('video'|'image')`, `dispose()`; run in client component; default `numPoses=2` degrade to 1 if FPS <16.
+   - IdentityTracking: Hungarian matching; allow ~300–500 ms dropout; optional calibration gesture (“raise right hand”) to pin primary user.
+   - PositionClassification (partner): Labels Mount, Side, Back, Knee-on-Belly, North-South, Guard, Turtle, Scramble. Apply hysteresis (2–3 frames) + min dwell (200–400 ms) before emitting change.
+   - SoloDrillDetection: per-drill `detectPhase` + `repCompleted` using thresholds JSON; track left/right symmetry.
+   - SessionEngine: emits events (`position_change`, `solo_rep`, manual attempt tags, `note`) and 1 Hz smoothed KPIs.
+   - VoiceCueEngine: queued Web Speech TTS; modes Basic/Technical/Motivational/Silent; flush queue on Stop.
 
-PRD anchors to reference
-- Sections 5 & 10 for PoseEngine contracts, smoothing, thresholds; Sections 8 & 9 for data models and API contracts; KPI definitions under “KPIs and Recap”.
+4. KPIs & Persistence
 
-Gotchas
-- Queue voice cues to avoid overlap; flush on Stop. Apply hysteresis to reduce label ping‑pong and false transition counts. Downsample recap timeline; keep IndexedDB as the source of raw local events.
+   - Partner KPIs: per-position time %, transitions & efficiency, guard retention %, scramble win %, attempts vs success, intensity metrics.
+   - Solo KPIs: reps, best 30s tempo, symmetry, ROM, fatigue curve.
+   - Only aggregates + session meta saved remotely; raw timeline stays IndexedDB (downsample for recap rendering if needed).
 
-Change policy
-- If code diverges from this doc, prefer `PRD.md` and current code. Update this file alongside structural changes.
+5. Routing & Gating
+
+   - Routes: `/` (Landing), `/home`, `/drill?mode=partner|solo`, `/account`. Auth required for all but `/`. (If email verification enforced, unverified -> `/verify`).
+   - Middleware (optional) may redirect unauthenticated; still keep client guard.
+
+6. Performance Requirements
+
+   - Target ≥20 FPS @720p; never let sustained FPS drop below 16 (auto-reduce resolution or `numPoses`). Median classification latency <150 ms. Provide (hideable) FPS meter.
+   - Dispose/detach models & tensors on route leave / engine switch to avoid leaks.
+
+7. Data & Security
+
+   - Env vars (representative): `MONGO_URI`, `JWT_SECRET`, `SIGNUP_CAP`, `RESEND_API_KEY`, `EMAIL_FROM`, `NEXT_PUBLIC_API_BASE_URL`, `EMAIL_VERIFICATION_*`.
+   - Store only hashed email verification tokens (sha256 + TTL). JWT on all non-auth endpoints.
+
+8. Conventions
+
+   - Config JSON (tips/drills/phrases) keyed by `(label+role)` plus `focusAreas[]`, `trainingGoals[]` filters. Do NOT encode business logic in components—keep detection thresholds/data-driven.
+   - Use Zod both client & server for shared validation (avoid silent divergence).
+   - Engine / feature math: isolate pure functions (facilitates unit tests & WebWorker offload later).
+
+9. Testing Priorities
+
+   - Unit: geometry/feature extraction, classifier scoring & hysteresis, KPI calculators, rep detection logic.
+   - Integration: engine init/dispose, identity tracking stability under dropout, voice queue throttling, camera switching & overlay toggle.
+   - E2E: signup/login → drill start → events → recap save → account aggregates update flow.
+
+10. Common Pitfalls / Gotchas
+
+    - Do not access `window`/`document` in server components; wrap pose/camera modules in dynamic client-only imports.
+    - Always queue TTS (no overlapping `speak()`); flush on Stop & unmount.
+    - Apply classification hysteresis & dwell or KPI transition counts inflate.
+    - Never send raw landmarks to backend (even for debugging); log locally only.
+    - Keep stable PoseEngine interface—other modules depend on it (breaking change requires updating this file + PRD sections 5 & 10).
+
+11. Change Policy
+
+    - If implementation diverges from this doc vs `PRD.md`, align with `PRD.md`. Update both `PRD.md` and this file in the same PR when altering core contracts or data surfaces.
+
+12. Minimum Add Task Checklist (for new feature)
+    - Confirm privacy (no new raw frames/landmarks leaving device).
+    - Ensure performance (measure FPS diff in dev HUD).
+    - Add/update Zod schemas & types at boundary.
+    - Provide test coverage for new math/logic.
+    - Update tips/drills JSON if new labels or drills introduced.
+
+Questions or ambiguity: prefer explicit clarification via updating `PRD.md` before large refactors.
