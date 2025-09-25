@@ -7,6 +7,8 @@ import createError from 'http-errors';
 
 import { getConfig } from './config/config';
 import authRouter from './routes/auth';
+import sessionsRouter from './routes/sessions';
+import aggregatesRouter from './routes/aggregates';
 
 // Load config early (will exit if invalid)
 const { CLIENT_ORIGIN } = getConfig();
@@ -56,6 +58,8 @@ app.use('/api/auth/login', loginLimiter);
 
 // Auth + user routes
 app.use('/api', authRouter);
+app.use('/api', sessionsRouter);
+app.use('/api', aggregatesRouter);
 
 // Health route
 app.get('/api/health', (_req, res) => {
