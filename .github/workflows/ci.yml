@@ -26,3 +26,14 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Package Netlify Function (tsc already built server)
+        run: |
+          echo "Packaging function directory"
+          ls -R netlify/functions || true
+      - name: Local Smoke (start express)
+        run: |
+          node server/dist/index.js &
+          PID=$!
+          sleep 2
+          node server/scripts/smoke.js || (echo 'Smoke failed' && kill $PID && exit 1)
+          kill $PID
